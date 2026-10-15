@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>How my coding-agent kit fits together · Benny Fu</title>
+<style>
+:root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
+*{box-sizing:border-box}
+body{margin:0;font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--fg);background:#fff}
+main{max-width:720px;margin:0 auto;padding:56px 24px 48px}
+.back{font-size:.9rem}
+h1{font-size:1.9rem;line-height:1.25;margin:16px 0 8px}
+.lede{color:var(--muted);margin:0 0 8px}
+h2{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:44px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:20px}li{margin:0 0 6px}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.diagram{border:1px solid var(--line);border-radius:8px;padding:16px;margin:0 0 16px;overflow-x:auto;background:#f6f8fa}
+.diagram svg[aria-roledescription="sequence"]{min-width:560px}
+.diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+code{font-size:.9em;background:#f6f8fa;padding:1px 4px;border-radius:4px}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+@media (max-width:480px){main{padding:36px 18px 32px}h1{font-size:1.55rem}.diagram{padding:10px}}
+</style></head>
+<body><main>
+<a class="back" href="/">← Benny Fu</a>
+<h1>How my coding-agent kit fits together</h1>
+<p class="lede">Three parts: a devkit that runs the development loop, a knowledge base the agents read from, and a small set of harness-agnostic tools. This page covers how they connect, not what's inside them.</p>
+
+<h2>System overview</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  Dev[Engineer] --> Harness[Coding-agent harness]
+  Harness --> Kit[Devkit plugin]
+  Kit --> Flow[Task workflows]
+  Flow --> Agents[Role agents: design, develop, test, review]
+  Agents --> PR[Pull request on a product repo]
+  PR --> Review[Automated PR review]
+  Review -->|findings| Agents
+  KB[(Shared knowledge base)] -->|context| Kit
+  Tools[Harness-agnostic tools] --> Harness
+</pre></div>
+<p>The devkit is a plugin for a coding-agent harness. It turns a ticket into small spec stories, then runs workflows where separate agents handle design, development, testing, and PR creation. Each step's output is checked before the next starts.</p>
+<p>Every PR goes through automated review: a code-review agent and a security-review agent comment on it, and a review loop feeds their findings back to the developer agent until the PR is clean or a person steps in.</p>
+<p>Updating is one command. It pulls the newest plugin and the newest knowledge base, then reseeds each project's agent context, so every engineer runs the same version.</p>
+
+<h2>Knowledge base sync</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  A[Decision captured locally] --> B[Conflict check against shared KB]
+  B --> C[Synced into local agent rules]
+  C --> D[PR to shared KB]
+  D --> E[Team review and merge]
+  E --> F[Devkit update pulls KB]
+  F --> G[Seeded into project agent context]
+  G -.next decision.-> A
+</pre></div>
+<p>Upstream: when an engineer settles something worth keeping, such as a build quirk or a review rule, a capture step writes it to a personal knowledge base, checks it against the shared one for conflicts, and opens a PR. Teammates review each entry like code.</p>
+<p>Downstream: after merge, the devkit's update step pulls the shared knowledge base and copies it into each project's agent context. The boundary is strict. One plugin owns every write to the shared knowledge base, and the devkit only reads.</p>
+
+<h2>Tools and the human handoff</h2>
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant Ag as Agent
+  participant Br as Browser tool
+  participant Me as Me
+  Ag->>Br: navigate(url)
+  Br-->>Ag: page loaded
+  Ag->>Br: read() or screenshot()
+  Br-->>Ag: login wall
+  Ag->>Br: handoff(reason, timeout)
+  Br->>Me: notify and share live browser
+  Me->>Br: sign in, then done
+  Br-->>Ag: status: done / timeout / cancelled
+  Ag->>Br: read()
+</pre></div>
+<p>The tools are described as manifests, not tied to one harness. Each tool has typed inputs and outputs, a stated side effect, named error codes, and the names (never the values) of the credentials it needs. A checker validates every manifest against one schema, and versions follow semver.</p>
+<p>The browser namespace has four tools: navigate, read, screenshot, and handoff. Handoff is a single blocking call. It shares the live browser, notifies me, waits until I finish or the timeout passes, and always ends the share itself. The agent gets back <code>done</code>, <code>timeout</code>, or <code>cancelled</code>, with no separate start or stop step to forget.</p>
+<p>Session control for local agents is covered in <a href="https://bennytaipei.github.io/local-agent-mcp/">local-agent-mcp</a>.</p>
+
+<footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:false,theme:"neutral",fontFamily:"-apple-system,Segoe UI,Arial,sans-serif",flowchart:{useMaxWidth:true},sequence:{useMaxWidth:true}});
+let i=0;
+for (const el of document.querySelectorAll("pre.mermaid")) { const {svg}=await mermaid.render("d"+(i++), el.textContent); const div=document.createElement("div"); div.innerHTML=svg; el.replaceWith(div); }
+document.body.dataset.ready="1";
+</script>
+</body></html>
