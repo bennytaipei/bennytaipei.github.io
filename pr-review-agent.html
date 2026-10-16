@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>An AI pull-request reviewer that blocks on what matters · Benny Fu</title>
+<title>AI pull-request reviewer · Benny Fu</title>
 <style>
 :root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
 *{box-sizing:border-box}
@@ -25,17 +25,17 @@ footer{margin-top:48px;color:var(--muted);font-size:.9rem}
 </style></head>
 <body><main>
 <a class="back" href="/">← Benny Fu</a>
-<h1>An AI pull-request reviewer that blocks on what matters</h1>
-<p class="lede">A reusable CI pipeline that reviews every pull request in focused passes (security, reliability, compatibility, compliance), remembers what it already said, and blocks merges only on high and critical findings.</p>
+<h1>AI pull-request reviewer</h1>
+<p class="lede">I built a reusable CI pipeline that reviews pull requests in separate security, reliability, compatibility, and compliance passes. It suppresses findings it already reported and blocks merges only on high and critical findings.</p>
 <p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
 
 <h2>Problem and constraints</h2>
-<p>A network-security product has to meet compliance programs such as FedRAMP, ISMAP, and PCI DSS. Human reviewers couldn't check every pull request against all of that, and generic AI review bots produce noise. Noise matters: if a bot repeats the same finding on every push, developers stop reading it.</p>
+<p>A network-security product has to meet compliance programs such as FedRAMP, ISMAP, and PCI DSS. Human reviewers couldn't check every pull request against all of them. When a review bot repeats the same finding on every push, developers stop reading its comments.</p>
 <ul>
-<li>Review had to run on every pull request, in many repos, with almost no setup per repo.</li>
-<li>It had to call a corporate LLM endpoint, with keys held as CI secrets.</li>
-<li>Teams needed to try it in advisory mode first and switch to blocking later.</li>
-<li>Findings must never apply to code that has already moved on, for example after a force push.</li>
+<li>Review had to run on every pull request, in many repos, with little setup per repo.</li>
+<li>It had to call a corporate LLM endpoint, with keys stored as CI secrets.</li>
+<li>Teams needed to run it in advisory mode first and switch to blocking later.</li>
+<li>Findings must not apply to code that has changed since the review started, for example after a force push.</li>
 </ul>
 
 <h2>Architecture</h2>
@@ -48,9 +48,9 @@ flowchart LR
   U7 --> U5[Comment writer + memory]
   U7 --> U6[Check run]
 </pre></div>
-<p>I split the reviewer into small units with clear boundaries. Each one has a single job and its own tests. A product repo adopts it with two files: a contract that names its risky paths, languages, and mode, and a short workflow that calls the shared reusable workflow. A later unit runs the same engine as a GitHub App on webhooks, for orgs where reusable workflows don't fit. Two more units sit beside the pipeline: an on-demand full-repo compliance scan that reuses the review prompts, and a fix-PR creator that needs human approval.</p>
+<p>I split the reviewer into small units. Each unit has one job and its own tests. A product repo adopts it with two files: a contract that names its risky paths, languages, and mode, and a short workflow that calls the shared reusable workflow. Another unit runs the same engine as a GitHub App on webhooks, for orgs where reusable workflows don't fit. Two more units sit beside the pipeline. One is an on-demand full-repo compliance scan that reuses the review prompts. The other is a fix-PR creator that needs human approval.</p>
 
-<h2>Control and logic flow</h2>
+<h2>Control flow</h2>
 <div class="diagram"><pre class="mermaid">
 flowchart TD
   A([PR opened or updated]) --> B[Load contract]
@@ -73,10 +73,10 @@ flowchart TD
   O -->|yes| P([Check fails: merge blocked])
   O -->|no| Q([Check passes: advisory])
 </pre></div>
-<p>Each pass has its own prompt and looks at one concern. One prompt that covers everything mixes the domains: security notes leak into style comments, and the model spreads its attention thin. Separate passes cost more calls, but each finding is sharper and easier to trust.</p>
-<p>Three early exits keep cost and noise down. The kill switch turns the agent off per repo without a code change. The risk classifier skips pull requests that touch only low-risk paths. The freshness check aborts if the head commit moved during the run, so a review never lands on code it didn't read.</p>
+<p>Each pass has its own prompt and covers one concern. A single prompt for every concern tends to mix them, for example security notes in style comments. Separate passes cost more LLM calls and make each finding easier to check and tune.</p>
+<p>Three early exits limit cost and noise. The kill switch in the contract turns the agent off for a repo without a code change. The risk classifier skips pull requests that touch only low-risk paths. The freshness check aborts if the head commit moved during the run.</p>
 
-<h2>Data flow: review memory</h2>
+<h2>Review history</h2>
 <div class="diagram"><pre class="mermaid">
 sequenceDiagram
   participant O as Orchestrator
@@ -92,32 +92,33 @@ sequenceDiagram
   W->>W: fingerprint dismissed by developer = suppress
   W->>G: replace old agent comment with one fresh summary
 </pre></div>
-<p>The reviewer keeps no database. Its memory lives in the pull request itself. Every agent comment carries hidden markers with the reviewed commit and a fingerprint for each finding. On the next run, the writer reads them back and asks the compare API which files changed since then. A finding with the same fingerprint in an unchanged file is a repeat, so it gets collapsed rather than posted again. A developer can dismiss a fingerprint with a marker in a comment, and that suppression sticks. Old agent comments are deleted and replaced, so the thread always shows one current summary.</p>
+<p>The reviewer stores its history in the pull request instead of a database. Every agent comment carries hidden markers with the reviewed commit and a fingerprint for each finding. On the next run, the writer reads those markers and asks the compare API which files changed since that commit. A finding with the same fingerprint in an unchanged file is a repeat, and the writer collapses it. A developer can dismiss a fingerprint by adding a marker in a comment, and that dismissal persists. The writer deletes old agent comments and posts one current summary.</p>
 
 <h2>Failure modes and guardrails</h2>
+<div class="tw"><table>
+<tr><th>Failure</th><th>Guardrail</th></tr>
+<tr><td>A noisy rollout</td><td>Teams start in advisory mode, and the contract has a kill switch.</td></tr>
+<tr><td>A stale review after a force push</td><td>The SHA check aborts the run.</td></tr>
+<tr><td>Repeated findings</td><td>Fingerprints, the changed-since check, and developer dismissals.</td></tr>
+<tr><td>Blocking too much</td><td>Only high and critical findings fail the check, and only in blocking mode.</td></tr>
+<tr><td>Large repos in compliance scans</td><td>The scan filters by language and skip paths, splits files into LLM-sized batches, removes duplicate findings, and files one issue.</td></tr>
+<tr><td>Unwanted automated changes</td><td>The fix-PR unit opens a separate PR against the feature branch and needs human approval. It doesn't push to the author's branch.</td></tr>
+<tr><td>Secret exposure</td><td>The endpoint, key, and checkout token are CI secrets, referenced by name only.</td></tr>
+</table></div>
+
+<h2>Tradeoffs and alternatives</h2>
 <ul>
-<li><b>Bad or noisy rollout:</b> advisory mode first. The kill switch is in the contract.</li>
-<li><b>Stale review after a force push:</b> the SHA check aborts the run.</li>
-<li><b>Repeated findings:</b> fingerprints, the changed-since check, and developer dismissals.</li>
-<li><b>Over-blocking:</b> only high and critical findings fail the check, and only in blocking mode.</li>
-<li><b>Large repos for compliance scans:</b> the on-demand full-repo scan filters by language and skip paths, splits files into LLM-sized batches, removes duplicate findings, and files one issue as the result.</li>
-<li><b>Automated fixes:</b> a separate unit can open a fix PR against the feature branch, but a human must approve it. It never pushes to the author's branch.</li>
-<li><b>Secrets:</b> the endpoint, key, and checkout token are CI secrets, referenced by name only.</li>
+<li>A database for review history would be more flexible, but it's another service to run and secure. PR comments are already scoped to the PR, audited, and visible to the developer.</li>
+<li>One combined review prompt would be cheaper, but noisier and harder to tune.</li>
+<li>Blocking from the start would enforce rules sooner, at the cost of developer trust while the prompts are still being tuned.</li>
+<li>I didn't allow auto-pushed fixes. Fix PRs are separate and need human approval.</li>
 </ul>
 
-<h2>Tradeoffs and alternatives I rejected</h2>
+<h2>Next steps</h2>
 <ul>
-<li><b>A database for review history.</b> More flexible, but it's one more service to run and secure. PR comments are already scoped, audited, and visible to the developer.</li>
-<li><b>One combined review prompt.</b> Cheaper, but noisier and harder to tune.</li>
-<li><b>Blocking from day one.</b> Fastest path to enforcement, but also the fastest way to lose developer trust.</li>
-<li><b>Auto-pushing fixes.</b> Rejected. Fix PRs are separate and need human approval.</li>
-</ul>
-
-<h2>What I'd do next</h2>
-<ul>
-<li>Label a sample of findings as true or false positives, so each pass's precision can be tracked over time.</li>
-<li>Feed developer dismissals back as prompt examples for each repo.</li>
-<li>Link findings to compliance control IDs so audit evidence comes out of normal review.</li>
+<li>Label a sample of findings as true or false positives, to track each pass's precision over time.</li>
+<li>Use developer dismissals as prompt examples for each repo.</li>
+<li>Map findings to compliance control IDs, so review output can serve as audit evidence.</li>
 </ul>
 
 <footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
