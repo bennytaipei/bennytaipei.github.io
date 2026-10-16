@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Harness-agnostic agent tools and the human handoff · Benny Fu</title>
+<title>Agent tool manifests and the browser handoff · Benny Fu</title>
 <style>
 :root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
 *{box-sizing:border-box}
@@ -25,17 +25,17 @@ footer{margin-top:48px;color:var(--muted);font-size:.9rem}
 </style></head>
 <body><main>
 <a class="back" href="/">← Benny Fu</a>
-<h1>Harness-agnostic agent tools and the human handoff</h1>
-<p class="lede">A manifest-first tool catalog, plus a containerized browser runtime whose handoff call puts a person in the loop through noVNC whenever an agent hits a login wall.</p>
+<h1>Agent tool manifests and the browser handoff</h1>
+<p class="lede">I built a tool catalog where each tool is a manifest that any agent harness can load, and a containerized browser runtime with a handoff call that lets me sign in over noVNC when an agent hits a login page.</p>
 <p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
 
 <h2>Problem and constraints</h2>
-<p>I run several agent harnesses, local and in the cloud. Each has its own way to declare tools, and every one eventually reaches a single sign-on page it can't get past. I wanted one tool definition that every harness could use, and a safe way for a person to step in.</p>
+<p>I use several agent harnesses, local and in the cloud. Each declares tools differently, and each one eventually hits a single sign-on page it can't get past. I wanted one tool definition that works in every harness, and a way for me to sign in for the agent.</p>
 <ul>
-<li>Tools must be described once and work in any harness.</li>
-<li>Agents shouldn't load every tool schema up front, because it wastes context.</li>
-<li>Credentials are never stored in the repo, and manifests name them without holding values.</li>
-<li>A human handoff must always clean up after itself, even on a timeout.</li>
+<li>Each tool is described once and works in any harness.</li>
+<li>Agents shouldn't load every tool schema at the start, because the schemas use up context.</li>
+<li>The repo never stores credentials. Manifests name them without holding values.</li>
+<li>A handoff must always stop sharing the screen, including on a timeout.</li>
 </ul>
 
 <h2>Architecture</h2>
@@ -47,11 +47,11 @@ flowchart TD
   H[Local and cloud harnesses] --> RT
   RT --> CT[Container: display + Chromium]
 </pre></div>
-<p>The repo holds manifests, not implementations. Level one is an index of namespaces, each with one line of description. Level two is one manifest per tool. An agent reads the index first and loads a namespace's schemas only when it needs them.</p>
-<p>Every manifest follows one schema with no extra fields allowed. It requires a qualified name, a semver version, when to use the tool, typed inputs and outputs, a non-empty side-effect statement ("None." for read-only tools), named error codes, and the names of the credentials it needs. A checker validates every manifest against the schema. Policy and judgment stay in skills, not in tools.</p>
-<p>The browser runtime reads its tool names, descriptions, and schemas from those manifests when it starts, so the contract and the server can't drift apart. Each harness starts the runtime in a Podman container with a virtual display and a persistent browser profile.</p>
+<p>The repo holds manifests, not implementations. The first level is an index of namespaces, each with a one-line description. The second level is one manifest per tool. An agent reads the index first and loads a namespace's schemas only when it needs them.</p>
+<p>Every manifest follows one schema that allows no extra fields. It requires a qualified name, a semver version, when to use the tool, typed inputs and outputs, a side-effect statement ("None." for read-only tools), named error codes, and the names of the credentials it needs. A checker validates every manifest against the schema. Policy and judgment stay in skills.</p>
+<p>The browser runtime loads its tool names, descriptions, and schemas from the manifests at startup, so the server always matches the contract. Each harness starts the runtime in a Podman container with a virtual display and a persistent browser profile.</p>
 
-<h2>Control flow: one blocking handoff call</h2>
+<h2>Handoff control flow</h2>
 <div class="diagram"><pre class="mermaid">
 sequenceDiagram
   participant A as Agent
@@ -70,35 +70,36 @@ sequenceDiagram
   R-->>A: done / timeout / cancelled
   A->>R: read (now signed in)
 </pre></div>
-<p>Handoff is one blocking call, not a start and stop pair. The runtime starts the screen share only for the length of the call, notifies me through a webhook, waits for Done, Cancel, or the timeout, and always tears the share down before it returns. The agent can't forget to stop sharing, because it never started sharing itself.</p>
+<p>Handoff is one blocking call. The runtime starts the screen share for the length of the call, notifies me through a webhook, and waits for Done, Cancel, or the timeout. It stops the share before it returns, so the agent never has to.</p>
 
 <h2>Data flow</h2>
 <ul>
-<li><b>In:</b> tool calls from the harness over stdio. The settings are environment variables: profile directory, notify webhook, ports, and bind address.</li>
-<li><b>Out to a person:</b> one JSON message with the reason, a link, and an expiry. The link opens noVNC on the same live browser the agent was using.</li>
-<li><b>Kept:</b> only the browser profile, so a sign-in lasts across sessions. Handoff tokens and the X authority file sit in a runtime folder next to it.</li>
+<li>The harness sends tool calls over stdio. Settings come from environment variables: the profile directory, notify webhook, ports, and bind address.</li>
+<li>When a handoff starts, the runtime sends one JSON message with the reason, a link, and an expiry time. The link opens noVNC on the browser the agent was using.</li>
+<li>Only the browser profile persists, so a sign-in carries over to later sessions. Handoff tokens and the X authority file are stored in a runtime folder next to it.</li>
 </ul>
 
 <h2>Failure modes and guardrails</h2>
+<div class="tw"><table>
+<tr><th>Failure</th><th>Guardrail</th></tr>
+<tr><td>The notifier is unreachable</td><td>Handoff returns <code>notify_failed</code> and stops the share, so a screen is never shared without a notification.</td></tr>
+<tr><td>Network exposure</td><td>Listeners bind to localhost by default, and the VNC server stays on a private localhost port.</td></tr>
+<tr><td>Display collisions</td><td>The runtime picks a free display and never attaches to one in use.</td></tr>
+<tr><td>Breaking contract changes</td><td>Semver rules define when a change needs a major version.</td></tr>
+<tr><td>Port conflicts between parallel sessions</td><td>Some launchers pin fixed ports, so a second session can fail its handshake while the first holds them. This is a known gap. The runtime already supports free ports, and the launchers need to use them.</td></tr>
+</table></div>
+
+<h2>Tradeoffs and alternatives</h2>
 <ul>
-<li><b>Notifier unreachable:</b> handoff returns <code>notify_failed</code> and tears down the share. It never leaves a live screen open with nobody told.</li>
-<li><b>Exposure:</b> by default listeners bind to localhost, and the VNC server itself stays on a private localhost port.</li>
-<li><b>Display collisions:</b> the runtime picks a free display and never attaches to one in use.</li>
-<li><b>Breaking changes:</b> semver rules define when a contract change needs a major version bump.</li>
-<li><b>Known gap:</b> some harness launchers pin fixed ports, so a second parallel session can fail its handshake while the first holds them. The fix is per-session free ports in the launcher, which the runtime already supports.</li>
+<li>Driving my desktop browser over its debug port would share my real session. A browser update or relaunch breaks that connection, and the agent would get my whole profile. The container has its own profile and restarts on its own.</li>
+<li>Separate start and stop handoff tools would leave the screen shared if the agent missed the stop call.</li>
+<li>Defining tools per harness is faster the first time, but each harness then keeps its own copy and the copies drift.</li>
 </ul>
 
-<h2>Tradeoffs and alternatives I rejected</h2>
+<h2>Next steps</h2>
 <ul>
-<li><b>Driving my desktop browser over its debug port.</b> It shares my real session, but a browser update or relaunch breaks it, and the agent gets my whole profile. The container keeps a separate profile and comes back on its own.</li>
-<li><b>Separate start and stop handoff tools.</b> A missed stop leaves a screen share open.</li>
-<li><b>Tools defined per harness.</b> Quicker the first time, but every harness then needs its own copy and they drift.</li>
-</ul>
-
-<h2>What I'd do next</h2>
-<ul>
-<li>Pick ports per session in every launcher, and add a health check before the first tool call.</li>
-<li>Add more namespaces, such as chat, behind the same contract.</li>
+<li>Use per-session ports in every launcher, and add a health check before the first tool call.</li>
+<li>Add more namespaces, such as chat, under the same contract.</li>
 </ul>
 
 <footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>

@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Running many coding agents at once: a lightweight control plane · Benny Fu</title>
+<title>Tracking parallel coding-agent sessions · Benny Fu</title>
 <style>
 :root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
 *{box-sizing:border-box}
@@ -25,17 +25,17 @@ footer{margin-top:48px;color:var(--muted);font-size:.9rem}
 </style></head>
 <body><main>
 <a class="back" href="/">← Benny Fu</a>
-<h1>Running many coding agents at once: a lightweight control plane</h1>
-<p class="lede">How I keep track of parallel coding-agent sessions across harnesses with per-agent status files, a census, and clean handoff rules, without a central server.</p>
+<h1>Tracking parallel coding-agent sessions</h1>
+<p class="lede">I led the design of the status rules I use to track parallel coding-agent sessions across harnesses. Each agent writes its own status file, a census reads them, and handoff rules let a new session resume from disk. There is no central server.</p>
 <p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
 
 <h2>Problem and constraints</h2>
-<p>On a busy day I have several coding agents running in parallel, in different harnesses, repos, and worktrees. Questions kept coming up: which session owns which task, which one is blocked on me, and where a new session should pick up when an old one runs out of context. Asking each session took time and cut into its work.</p>
+<p>I often run several coding agents at once, in different harnesses, repos, and worktrees. I needed to know which session owns which task, which one is waiting on me, and where a new session should resume when an old one runs out of context. Asking each session took time and interrupted its work.</p>
 <ul>
 <li>It had to work the same way in every harness.</li>
-<li>There could be no shared file that two agents write at once.</li>
-<li>A successor session had to be able to resume from what's on disk alone.</li>
-<li>It could add almost no load to me.</li>
+<li>Two agents couldn't write to the same file.</li>
+<li>A new session had to be able to resume from what's on disk.</li>
+<li>It had to need very little attention from me.</li>
 </ul>
 
 <h2>Architecture</h2>
@@ -48,9 +48,9 @@ flowchart LR
   L[Session control server] --> C
   C --> V[One view: task, state, blocked, needs me]
 </pre></div>
-<p>Every harness gets the same rule text, kept in one canonical file. Each agent writes only its own status file, named by harness and session id, in an ignored folder at the project root. The census reads those files to show one view of what's running. Session listing and steering go through <a href="https://bennytaipei.github.io/local-agent-mcp/">local-agent-mcp</a>.</p>
+<p>Every harness gets the same rule text from one canonical file. Each agent writes only its own status file, named by harness and session id, in an ignored folder at the project root. The census reads those files and shows what's running. Session listing and steering go through <a href="https://bennytaipei.github.io/local-agent-mcp/">local-agent-mcp</a>.</p>
 
-<h2>Data flow: the status record</h2>
+<h2>The status record</h2>
 <div class="tw"><table>
 <tr><th>Group</th><th>Fields</th></tr>
 <tr><td>Identity</td><td>harness, session id, pid, census slot</td></tr>
@@ -60,9 +60,9 @@ flowchart LR
 <tr><td>Progress</td><td>doing, next, checkpoint (what's done, where, and the exact next step)</td></tr>
 <tr><td>Attention</td><td>blocked, needs_human, health, context_near_limit, updated_at</td></tr>
 </table></div>
-<p>Each agent writes atomically: it writes to a temp file in the same folder, then renames it onto its own file. Readers never see half a record.</p>
+<p>Each agent writes to a temp file in the same folder, then renames it onto its own file, so readers never see a partial record.</p>
 
-<h2>Control and logic flow</h2>
+<h2>Session lifecycle</h2>
 <div class="diagram"><pre class="mermaid">
 flowchart TD
   S([Session starts]) --> L[List status files]
@@ -79,27 +79,28 @@ flowchart TD
   SP -->|yes| CH[Children A-1, A-2, each with its own worktree. Parent marked split]
   SP -->|no| E([Exit: done, parked, or exited, with a checkpoint])
 </pre></div>
-<p>Agents write at startup, at milestones (plan set, blocked, PR opened, handoff), whenever state or needs_human changes, and on exit. The startup question is the only interruption allowed under my <a href="https://bennytaipei.github.io/local-agent-mcp/keep-going/">Keep-Going</a> anti-stall rules, and the agent asks it only when the choice is truly ambiguous.</p>
+<p>Agents write their file at startup, at milestones such as setting a plan, getting blocked, opening a PR, or handing off, whenever state or needs_human changes, and on exit. The startup question is the only interruption my <a href="https://bennytaipei.github.io/local-agent-mcp/keep-going/">Keep-Going</a> rules allow, and the agent asks it only when it can't tell which task to continue.</p>
 
 <h2>Failure modes and guardrails</h2>
+<div class="tw"><table>
+<tr><th>Failure</th><th>Guardrail</th></tr>
+<tr><td>Write collisions</td><td>Each agent has one file and writes it atomically. Agents don't edit each other's files, except to mark a file whose process has exited or when I ask.</td></tr>
+<tr><td>Lost context</td><td>The checkpoint field is written so another session can resume from it.</td></tr>
+<tr><td>Parallel edits to the same files</td><td>Each split child gets its own worktree and branch. The default is one session per initiative.</td></tr>
+<tr><td>Status files committed to the repo</td><td>The folder goes into git's local exclude list.</td></tr>
+<tr><td>A stale census</td><td>The census marks sessions with no live process as not live, regardless of their last report.</td></tr>
+</table></div>
+
+<h2>Tradeoffs and alternatives</h2>
 <ul>
-<li><b>Write collisions:</b> one file per agent, written atomically. Agents never edit each other's files, except to mark a file whose process is gone or when I ask.</li>
-<li><b>Lost context:</b> the checkpoint field is written for a stranger to resume from.</li>
-<li><b>Parallel edits to the same files:</b> each split child gets its own worktree and branch. The default is one seat per initiative.</li>
-<li><b>Leaking into the repo:</b> the folder is added to git's local exclude list and never committed.</li>
-<li><b>Stale census:</b> the census marks sessions with no live process as not live instead of trusting their last report.</li>
+<li>The rules started with one shared status file and moved to one file per agent.</li>
+<li>A central server or database would offer more features, but it's another service to keep running, and every harness would need a client. Plain files work in every harness.</li>
+<li>Asking each session for status costs that session context and time. Reading a file costs the session nothing.</li>
 </ul>
 
-<h2>Tradeoffs and alternatives I rejected</h2>
+<h2>Next steps</h2>
 <ul>
-<li><b>A single shared status file.</b> I started with one. I moved to per-agent files so concurrent writers can never overwrite each other.</li>
-<li><b>A central server or database.</b> More features, but one more thing to keep alive, and every harness would need a client. Plain files work everywhere.</li>
-<li><b>Asking each session for status.</b> Costs every session context and attention. Reading a file costs it nothing.</li>
-</ul>
-
-<h2>What I'd do next</h2>
-<ul>
-<li>Publish the status schema as a JSON Schema and validate files on write.</li>
+<li>Publish the status schema as JSON Schema and validate files on write.</li>
 <li>Add a small dashboard on top of the census for blocked and needs-human items.</li>
 </ul>
 

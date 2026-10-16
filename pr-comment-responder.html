@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Answering review comments honestly: the PR comment responder · Benny Fu</title>
+<title>PR comment responder · Benny Fu</title>
 <style>
 :root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
 *{box-sizing:border-box}
@@ -25,17 +25,17 @@ footer{margin-top:48px;color:var(--muted);font-size:.9rem}
 </style></head>
 <body><main>
 <a class="back" href="/">← Benny Fu</a>
-<h1>Answering review comments honestly: the PR comment responder</h1>
-<p class="lede">An agent stage that verifies each review comment at the current commit, records a verdict for every thread, posts corrected suggestions inline, and resolves only the threads its verdict allows.</p>
+<h1>PR comment responder</h1>
+<p class="lede">I led the work on an agent stage that checks each review comment against the current commit, records a verdict for every thread, posts corrected suggestions inline, and resolves only the threads its verdict allows.</p>
 <p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
 
 <h2>Problem and constraints</h2>
-<p>Once AI reviewers and Copilot started commenting on pull requests, the comments piled up faster than people could triage them. Some were right, some were wrong, and some suggested code that wouldn't compile. A responder agent had to work through them without making things worse.</p>
+<p>AI reviewers and Copilot added review comments faster than people could triage them. Some comments were right, some were wrong, and some suggested code that wouldn't compile. A responder agent had to work through them.</p>
 <ul>
-<li>It runs on a shared agent platform where the worker shell has <b>no GitHub credential</b>. It can only write through the platform's own tools.</li>
-<li>It must never push fix commits or open PRs in this stage. It answers comments and nothing else.</li>
+<li>It runs on a shared agent platform where the worker shell has no GitHub credential. It can write only through the platform's tools.</li>
+<li>It doesn't push commits or open PRs in this stage. It only responds to comments.</li>
 <li>Threads that still need a person must stay open.</li>
-<li>The summary must match what the agent actually did.</li>
+<li>The summary must match what the agent did.</li>
 </ul>
 
 <h2>Architecture</h2>
@@ -52,9 +52,9 @@ flowchart TD
   IR & RS & SM --> PT
   PT --> PR[Pull request]
 </pre></div>
-<p>The key artifact is the <b>dispositions</b> list. It is structured output that records, for each thread, a verdict, the exact code span that was checked, an optional replacement, and a reason. Everything visible on the PR comes from that list.</p>
+<p>The agent's main output is a dispositions list. For each thread it records a verdict, the exact code span the agent checked, an optional replacement, and a reason. The inline review, thread resolutions, and summary on the PR are all generated from that list.</p>
 
-<h2>Control and logic flow</h2>
+<h2>Verdict logic</h2>
 <div class="diagram"><pre class="mermaid">
 flowchart TD
   A[Thread] --> B{Still valid at current head?}
@@ -65,36 +65,37 @@ flowchart TD
   C -->|suggestion is wrong| CO[Resolve and post a corrected inline suggestion]
   C -->|needs a different fix| SN[Suggest a new fix, leave open]
 </pre></div>
-<p>Thread resolution follows the verdict exactly. Only the "resolve" and "correct-inaccurate" verdicts close a thread. "Leave-accurate" and "suggest-new-fix" stay open for a person. Copilot's own suggestion blocks get checked too. An accurate one is left alone. An inaccurate one is resolved and replaced with a corrected inline suggestion.</p>
+<p>Only the "resolve" and "correct-inaccurate" verdicts close a thread. Threads marked "leave-accurate" or "suggest-new-fix" stay open for a person. The agent also checks Copilot's suggestion blocks. It leaves accurate ones alone, and resolves inaccurate ones and replaces them with a corrected inline suggestion.</p>
 
-<h2>How the design changed under test</h2>
-<p>I shipped this in short rounds, each one prompted by evidence from a test run:</p>
+<h2>Changes after each test round</h2>
+<p>We shipped this in short rounds, and each round fixed something a test run exposed.</p>
 <ol>
-<li><b>Capability check.</b> A synthetic run showed the worker had no GitHub API access at all, and git and the GitHub CLI both failed. The design stopped assuming shell access: threads are read and resolved through platform tools, and the agent emits dispositions as structured output.</li>
-<li><b>Verdict-exact resolution.</b> A later run resolved all five threads, including two that had to stay open. Its summary said "no corrections" while the dispositions held two. The fix: resolve threads only for specific verdicts, and render the summary mechanically from the dispositions so it can't drift.</li>
-<li><b>Self-posting.</b> At first a dispatcher workflow posted the inline review from the dispositions and checked every span against the head commit. Once the platform added a review-comment tool, the worker posted under its own identity. That let us drop the dispatcher's extra write permission.</li>
+<li>A synthetic run showed the worker had no GitHub API access, and both git and the GitHub CLI failed. The agent now reads and resolves threads through platform tools and emits dispositions as structured output.</li>
+<li>A later run resolved all five threads, including two that had to stay open. Its summary said "no corrections" while the dispositions held two. Now only specific verdicts resolve threads, and the summary is rendered directly from the dispositions.</li>
+<li>At first a dispatcher workflow posted the inline review and checked every span against the head commit. When the platform added a review-comment tool, the worker started posting under its own identity, and we removed the dispatcher's extra write permission.</li>
 </ol>
 
 <h2>Failure modes and guardrails</h2>
+<div class="tw"><table>
+<tr><th>Failure</th><th>Guardrail</th></tr>
+<tr><td>The run ends without a report</td><td>A summary comment is required, so the agent can't finish in an unknown state.</td></tr>
+<tr><td>Stale anchors</td><td>Spans are checked against the current head. Stale ones are dropped and logged.</td></tr>
+<tr><td>Resolving threads that should stay open</td><td>Resolution depends on the verdict, not on the model's judgment.</td></tr>
+<tr><td>Scope creep</td><td>This stage makes no commits, pushes, or new PRs, and doesn't re-request Copilot.</td></tr>
+<tr><td>Broad permissions</td><td>Writes go through scoped platform tools.</td></tr>
+</table></div>
+
+<h2>Tradeoffs and alternatives</h2>
 <ul>
-<li><b>Silent ending:</b> a summary comment is required. The agent never ends in an unknown state.</li>
-<li><b>Stale anchors:</b> spans are checked against the current head, and stale ones are dropped and logged.</li>
-<li><b>Over-resolution:</b> resolution is tied to verdicts, not left to the model's judgment.</li>
-<li><b>Scope creep:</b> no commits, pushes, or new PRs from this stage, and no re-requesting Copilot.</li>
-<li><b>Permission sprawl:</b> writes go through scoped platform tools, so no broad write permission is needed.</li>
+<li>Letting the agent fix code directly would combine judging a comment with changing code, and it would need credentials the platform withholds.</li>
+<li>A free-text summary drifted from what happened in testing. A summary rendered from the dispositions can't.</li>
+<li>Resolving every thread the agent answered would hide threads that people still need to see.</li>
 </ul>
 
-<h2>Tradeoffs and alternatives I rejected</h2>
+<h2>Next steps</h2>
 <ul>
-<li><b>Letting the agent fix code directly.</b> Faster on paper, but it mixes judging a comment with changing code, and it needs credentials the platform deliberately withholds.</li>
-<li><b>A free-text summary.</b> Free text drifted from reality in testing. A rendered summary can't.</li>
-<li><b>Resolving everything the agent answered.</b> That hides threads people still need to see.</li>
-</ul>
-
-<h2>What I'd do next</h2>
-<ul>
-<li>Track how often people reopen or override verdicts, and use that as a quality signal.</li>
-<li>Pass verdicts back to the <a href="/pr-review-agent.html">PR reviewer</a> so findings people refuted get fewer repeats.</li>
+<li>Track how often people reopen or override verdicts, as a quality signal.</li>
+<li>Pass verdicts to the <a href="/pr-review-agent.html">PR reviewer</a>, so it repeats refuted findings less often.</li>
 </ul>
 
 <footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
