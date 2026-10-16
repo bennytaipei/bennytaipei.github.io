@@ -26,7 +26,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.9rem}
 <body><main>
 <a class="back" href="/">← Benny Fu</a>
 <h1>PR comment responder</h1>
-<p class="lede">I led the work on an agent stage that checks each review comment against the current commit, records a verdict for every thread, posts corrected suggestions inline, and resolves only the threads its verdict allows.</p>
+<p class="lede">I built an agent stage that checks each review comment against the current commit, records a verdict for every thread, posts corrected suggestions inline, and resolves only the threads its verdict allows.</p>
 <p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
 
 <h2>Problem and constraints</h2>
@@ -68,11 +68,11 @@ flowchart TD
 <p>Only the "resolve" and "correct-inaccurate" verdicts close a thread. Threads marked "leave-accurate" or "suggest-new-fix" stay open for a person. The agent also checks Copilot's suggestion blocks. It leaves accurate ones alone, and resolves inaccurate ones and replaces them with a corrected inline suggestion.</p>
 
 <h2>Changes after each test round</h2>
-<p>We shipped this in short rounds, and each round fixed something a test run exposed.</p>
+<p>I shipped this in short rounds, and each round fixed something a test run exposed.</p>
 <ol>
 <li>A synthetic run showed the worker had no GitHub API access, and both git and the GitHub CLI failed. The agent now reads and resolves threads through platform tools and emits dispositions as structured output.</li>
 <li>A later run resolved all five threads, including two that had to stay open. Its summary said "no corrections" while the dispositions held two. Now only specific verdicts resolve threads, and the summary is rendered directly from the dispositions.</li>
-<li>At first a dispatcher workflow posted the inline review and checked every span against the head commit. When the platform added a review-comment tool, the worker started posting under its own identity, and we removed the dispatcher's extra write permission.</li>
+<li>At first a dispatcher workflow posted the inline review and checked every span against the head commit. When the platform added a review-comment tool, the worker started posting under its own identity, and I removed the dispatcher's extra write permission.</li>
 </ol>
 
 <h2>Failure modes and guardrails</h2>
