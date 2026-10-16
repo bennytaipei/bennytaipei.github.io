@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Keep Going: a portable anti-stall design for coding agents · Benny Fu</title>
+<style>
+:root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
+*{box-sizing:border-box}
+body{margin:0;font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--fg);background:#fff}
+main{max-width:720px;margin:0 auto;padding:56px 24px 48px}
+.back{font-size:.9rem}
+h1{font-size:1.9rem;line-height:1.25;margin:16px 0 8px}
+.lede{color:var(--muted);margin:0 0 8px}
+h2{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:44px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:20px}li{margin:0 0 6px}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.diagram{border:1px solid var(--line);border-radius:8px;padding:16px;margin:0 0 16px;overflow-x:auto;background:#f6f8fa}
+.diagram svg[aria-roledescription="sequence"]{min-width:560px}
+.diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+code{font-size:.9em;background:#f6f8fa;padding:1px 4px;border-radius:4px}
+.meta{color:var(--muted);font-size:.9rem;margin:0 0 4px}
+table{border-collapse:collapse;width:100%;margin:0 0 16px;font-size:.92rem}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:#f6f8fa}
+.tw{overflow-x:auto}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+@media (max-width:480px){main{padding:36px 18px 32px}h1{font-size:1.55rem}.diagram{padding:10px}}
+</style></head>
+<body><main>
+<a class="back" href="/">← Benny Fu</a>
+<h1>Keep Going: a portable anti-stall design for coding agents</h1>
+<p class="lede">One principles file that every coding-agent harness loads as global instructions. It helps agents finish work without being prompted, and limits the open loops the person supervising them has to track.</p>
+<p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
+<h2>Overview</h2><div class="diagram"><pre class="mermaid">flowchart TD
+  G["Task / epic goal"] --> R
+  subgraph R["Research loop (one hop)"]
+    F["Fetch / read"] --> A["Act"] --> C["Checkpoint to disk"]
+  end
+  C --> D{"Stop signal?"}
+  D -- "Continue-signal: poke, status dump, redirect, HOLD" --> F
+  D -- "Real hard stop: secrets, force-push, spend, fork" --> H["Ask human"]
+  C --> O{"Context overflow?"}
+  O -- yes --> FL["Flush checkpoint"] --> RS["Fresh session resumes from file"] --> F
+  A --> S{"Spillover found?"}
+  S -- yes --> T["Ticket + checkpoint row"] --> SC["Silent child session drives ticket to farthest non-human end"]
+  S -- "parent stays Active" --> F
+  W["WIP cap: ≤2 coding + 1 tip"] -.-> R
+  C --> B["Builder claim"] --> P["Tip pack: every row to evidence"] --> V{"Independent verifier"}
+  V -- "tip-PASS" --> DONE["Done / push"]
+  V -- "tip-HOLD" --> F
+  SRC[("keep-going-research.md")] --> L1["OMP: @-include"] & L2["Grok: embedded copy"] & L3["Claude: shared.md"] & L4["Cursor: rule"]
+</pre></div><h2>The problem</h2>
+<p>Coding agents are good at individual steps and bad at finishing. The common failure is not a wrong answer; it is a stop. The agent writes a plan, fetches one page, prints a status table, and then waits with "want me to (1)… or (2)…?" The human has to come back and poke it: "go on", "check git too", "you missed the other page". Each poke is cheap alone but costly in aggregate.</p>
+<p>The second problem appears once agents <em>do</em> keep going: overload. Several live sessions, each able to ask a question, each with a half-finished claim of "done", turn the human into a full-time supervisor. More parallel agents did not mean less work for the person; it meant more open loops to remember.</p>
+<p>Keep Going is one principles file, loaded as global instructions by every harness, that addresses both: finish the work without being poked, and don't multiply the human's open loops while doing it.</p>
+<h2>Design goals</h2>
+<ul>
+<li><strong>Portable.</strong> Principles only. No product names, tool paths, or slash commands. Harness specifics live in a separate install map.</li>
+<li><strong>Overrides the wait bias, not the safety rules.</strong> It never weakens secrets, confidentiality, destructive git, the work/personal boundary, paid fan-out, or the WIP caps.</li>
+<li><strong>Measured.</strong> Every rule traces back to a pattern seen in real transcripts, not to taste.</li>
+</ul>
+<h2>The rules, by section</h2>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">1. Anti-stall and continue-signals</h3>
+<p>Waiting after a plan or partial fetch is a failure. State assumptions in one line and continue. Only a short list of things justifies a blocking question: secrets, destructive git, work/personal boundary, spend or fan-out, or two equally costly forks. "Which page?" and "should I check git too?" are not blocking: pick the obvious source, log it, keep going.</p>
+<p>The section's key idea is the <strong>continue-signal</strong>: events that look like a reason to stop but actually mean "you stopped too early". Examples:</p>
+<ul>
+<li>A burst of short follow-ups from the user after a pause.</li>
+<li>A status dump that ends while the checkpoint still lists non-human next steps (a "silent wait").</li>
+<li>A mid-session redirect or correction: absorb it into the checkpoint and carry on, rather than replying "got it, say go".</li>
+<li>A causal story: write what would falsify it and run the cheapest test before filing tickets.</li>
+<li>A reviewer's severity label, or a reopen after a claimed done.</li>
+<li>A defect found along the way: file a durable ticket with a repro rather than dismissing it as out of scope.</li>
+</ul>
+<p>Two later additions target specific thrash patterns. After a tool or API failure on a field name, payload shape, or line target, read the schema or a known-good call before retrying instead of guessing again. During live design iteration, after the second acceptance-changing steer, freeze a short acceptance checklist on disk and work against it without pausing for approval after every tweak.</p>
+<p>"Done" means the artifacts on the branch or remote match the claim, not that the session says so. For visual work, done requires actually rendering the UI and checking a screenshot against the criteria.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">2. The epic research loop</h3>
+<p>When the user names a tracker item or a rough outcome, the agent runs a fixed chain without asking between hops: recall prior sessions → field-filtered tracker read → linked design docs → git history and code → rewrite the checkpoint → synthesize (and save durable decisions to the knowledge base) → produce the next artifact. Each hop writes a note to disk. Loaded context is a starting point, not a waiting room.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">3. Disk is the memory</h3>
+<p>Conversations get compacted; files survive. Transcript mining showed that long sessions that shipped kept rewriting a plan or checkpoint file, while stalled ones kept the plan in chat. So every session keeps a small checkpoint: objective, current state, decisions, files changed, commands that worked or failed, next action, unresolved items. On resume, read it and verify against the filesystem before doing anything.</p>
+<p><strong>Early-flush triggers</strong> were tightened over time. The checkpoint must exist before the second mid-flight steer, not after compaction or a human status poke. A long session whose plan lives only in chat is a stall even if tools are still running.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">4. Overflow is a continue-signal</h3>
+<p>Context usually dies from worker transcript dumps and large tracker-edit payloads, not the user prompt. Workers return 400–600 word summaries and write result files; the main session reads files, never raw worker logs. Large connector writes go in a fresh, empty session. Flush triggers: the second real user poke with no checkpoint yet, or a chat history over about 1 MB with none. On "prompt too long": flush, start a successor session, resume from the file. Overflow is never a reason to stop.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">5. Auto-invoke</h3>
+<p>If a prompt mentions an epic, story, or issue key, the agent fires recall, tracker/wiki reads, git history, the checkpoint write, and knowledge ingest without waiting for a slash command. It never auto-fires deploys, notification toys, or paid multi-agent fan-out. Git is the progress bar: commit, push, and comment as you go.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">6. Subagents vs main</h3>
+<p>Read-only research belongs to background workers; the main context handles decisions and implementation. Workers write files and the parent reads them. Writes to external systems stay with the parent when the harness would block them in workers. No fire-and-forget: check worker output, and resume an expired worker by id rather than starting over.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">7. Hard stops</h3>
+<p>Secrets, confidentiality, force-push or hard reset, the work/personal boundary, paid or multi-agent spend, and two equally costly design forks. Everything else: assume, log, continue.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">8. Tip-trust: done that scales under light supervision</h3>
+<p>When a human can't check every turn, "trustworthy" has to mean something more specific than the builder's self-report. The vocabulary:</p>
+<ul>
+<li><strong>Source of truth:</strong> the brief or reference that defines acceptance, gathered before building.</li>
+<li><strong>Acceptance checklist:</strong> frozen rows, one criterion each.</li>
+<li><strong>Tip artifact:</strong> concrete evidence (path, screenshot, URL, PR tip) that actually shows the claim.</li>
+<li><strong>Tip pack / tip-claim:</strong> one claim mapping every row to an artifact.</li>
+<li><strong>Tip-PASS / tip-HOLD:</strong> the verifier's verdict. Only PASS unlocks done, push, or the next epic.</li>
+<li><strong>Builder ≠ verifier:</strong> the builder never passes its own work.</li>
+<li><strong>GUI VERIFY:</strong> for look-and-feel work, a live render plus a screenshot scrub against the criteria. Curl, a deploy hash, or a passing build doesn't count. If display or auth blocks it, done is marked provisional.</li>
+</ul>
+<p>Rules: resolve ambiguity into checklist rows before building; reject claims the evidence doesn't visibly show; one checklist and one comparison at the end, not continuous dual checking; any acceptance change resets the tip and needs one consolidated re-claim; a HOLD is a continue-signal with named gaps, not an invitation to drip one-row claims.</p>
+<h3 style="font-size:1.05rem;margin:28px 0 8px">9. WIP and mental load</h3>
+<p>Every new session, agent wake, or verification request costs the human attention until it passes or is explicitly parked.</p>
+<ul>
+<li><strong>WIP cap:</strong> at most two active coding sessions plus one verifier track. Park one before opening a third.</li>
+<li><strong>Silent spillover:</strong> a defect found mid-epic becomes a ticket plus a checkpoint row, and the parent stays on its objective. A <em>silent</em> child session then drives that ticket to its farthest non-human end (implement, test, open a PR, attach evidence), using the ticket as its only status channel: comments and status moves, never chat pokes or menus. Human-only gates become ticket blockers and the child stops cleanly. Silent doesn't mean unsupervised: the child follows the same checkpoint and tip-trust rules.</li>
+<li><strong>No curiosity branches mid-day.</strong> One ticket-scoped branch per spillover ticket is fine; a pile of anonymous branches is not.</li>
+<li><strong>One tip pack per epic per day at most</strong>, with no status-only wakes.</li>
+<li><strong>An overflow successor replaces its predecessor.</strong> It doesn't run alongside it.</li>
+<li><strong>Done for the human means fewer open loops:</strong> a pass, a parked checkpoint with no non-human steps left, or an explicit parked row.</li>
+</ul>
+<p>The reasoning: spawning a chatty agent per issue is the same supervision cost as opening that session yourself. Offload only happens when the extra work is invisible until it needs a human decision.</p>
+<h2>How it evolved</h2>
+<ul>
+<li><strong>Late August:</strong> the first version was mined from about 1,150 coding-agent sessions. Sessions that shipped were long, rewrote a plan file, and ended on an artifact. Stalls were tiny (about 3 user turns), wrote nothing, and ended on a menu. Sections 1–7 came from that contrast.</li>
+<li><strong>Early September:</strong> tip-trust (§8) and WIP/mental load (§9) were added as multiple parallel sessions became the norm. Rules added: minimize mid-day branches, prefer deeper checkpoints over more subagents, and later the silent spillover session with the ticket as its bus.</li>
+<li><strong>Daily scoring since then:</strong> a weekday morning job counted "pokes" (user nudges an agent could have avoided) per session in the previous day's transcripts and made one small, generic patch when the count regressed. Patterns it caught:</li>
+<li>silent waits after status dumps (Sep 9)</li>
+<li>field-name thrash and live design drip (Sep 10)</li>
+<li>a 42-poke design session with no checkpoint on disk, which led to freezing the checklist on disk after the second redirect (Sep 12)</li>
+<li>large chats with no checkpoint, which moved the flush trigger from "third steer / over 1 MB" to "second steer / second poke" (Sep 15–16)</li>
+</ul>
+<p>Short sessions returned to roughly zero pokes once the silent-wait rule landed.
+- <strong>Mid-September:</strong> one harness kept regressing while others improved. The cause was a stale embedded copy of the file, not the rules (see below).</p>
+<h2>How each harness loads it</h2>
+<p>There are two files: the principles file, which agents load, and an install map for humans that holds harness paths, kick commands, and provenance.</p>
+<ul>
+<li><strong>OMP:</strong> the global AGENTS.md <strong>@-includes the live principles file</strong>, so edits take effect in the next fresh session. Don't use OMP's SYSTEM.md, which replaces the default template; APPEND_SYSTEM.md is the fallback.</li>
+<li><strong>Grok Build:</strong> <code>~/.grok/AGENTS.md</code> holds an <strong>embedded copy</strong> (within the roughly 10k-character cap). It must be refreshed whenever the principles change. A three-week-old paste is why this harness lagged.</li>
+<li><strong>Claude Code:</strong> principles are pasted above core behaviors in the shared global instructions file (<code>shared.md</code>) under a "Keep going research workflow" heading. The older "stop and wait for resolution" rule explicitly doesn't apply to research.</li>
+<li><strong>Cursor:</strong> an always-applied rule file (<code>.cursor/rules/keep-going.mdc</code>) points at the principles.</li>
+</ul>
+<p>Silent spillover children run as non-interactive sessions with the same short prompt in each harness: a fresh print-mode session in the ticket's worktree, never a resume of the active session.</p>
+<p>Already-open resumed sessions keep the old text, so changes only take effect in fresh sessions.</p>
+<h2>Takeaways</h2>
+<ol>
+<li>Treat "the agent stopped" as a bug with named causes, and give each cause a continue-signal.</li>
+<li>Keep the plan on disk, not in chat.</li>
+<li>Separate builder from verifier, and require evidence that shows the claim.</li>
+<li>Cap the open loops a person sees. Offload by making extra work silent, not by adding more chats.</li>
+<li>Tune with data: count pokes, patch generically, re-measure.</li>
+</ol>
+<footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:false,theme:"neutral",fontFamily:"-apple-system,Segoe UI,Arial,sans-serif",flowchart:{useMaxWidth:true},sequence:{useMaxWidth:true}});
+let i=0;
+for (const el of document.querySelectorAll("pre.mermaid")) { const {svg}=await mermaid.render("d"+(i++), el.textContent); const div=document.createElement("div"); div.innerHTML=svg; el.replaceWith(div); }
+document.body.dataset.ready="1";
+</script>
+</body></html>

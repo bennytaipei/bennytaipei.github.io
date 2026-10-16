@@ -79,7 +79,7 @@ flowchart TD
   SP -->|yes| CH[Children A-1, A-2, each with its own worktree. Parent marked split]
   SP -->|no| E([Exit: done, parked, or exited, with a checkpoint])
 </pre></div>
-<p>Agents write their file at startup, at milestones such as setting a plan, getting blocked, opening a PR, or handing off, whenever state or needs_human changes, and on exit. The startup question is the only interruption my <a href="https://bennytaipei.github.io/local-agent-mcp/keep-going/">Keep-Going</a> rules allow, and the agent asks it only when it can't tell which task to continue.</p>
+<p>Agents write their file at startup, at milestones such as setting a plan, getting blocked, opening a PR, or handing off, whenever state or needs_human changes, and on exit. The startup question is the only interruption my <a href="https://bennytaipei.github.io/keep-going/">Keep-Going</a> rules allow, and the agent asks it only when it can't tell which task to continue.</p>
 
 <h2>Failure modes and guardrails</h2>
 <div class="tw"><table>
