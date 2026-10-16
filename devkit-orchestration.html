@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>From ticket to pull request: the devkit's agent pipeline · Benny Fu</title>
+<style>
+:root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
+*{box-sizing:border-box}
+body{margin:0;font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--fg);background:#fff}
+main{max-width:720px;margin:0 auto;padding:56px 24px 48px}
+.back{font-size:.9rem}
+h1{font-size:1.9rem;line-height:1.25;margin:16px 0 8px}
+.lede{color:var(--muted);margin:0 0 8px}
+h2{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:44px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:20px}li{margin:0 0 6px}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.diagram{border:1px solid var(--line);border-radius:8px;padding:16px;margin:0 0 16px;overflow-x:auto;background:#f6f8fa}
+.diagram svg[aria-roledescription="sequence"]{min-width:560px}
+.diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+code{font-size:.9em;background:#f6f8fa;padding:1px 4px;border-radius:4px}
+.meta{color:var(--muted);font-size:.9rem;margin:0 0 4px}
+table{border-collapse:collapse;width:100%;margin:0 0 16px;font-size:.92rem}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:#f6f8fa}
+.tw{overflow-x:auto}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+@media (max-width:480px){main{padding:36px 18px 32px}h1{font-size:1.55rem}.diagram{padding:10px}}
+</style></head>
+<body><main>
+<a class="back" href="/">← Benny Fu</a>
+<h1>From ticket to pull request: the devkit's agent pipeline</h1>
+<p class="lede">How the devkit turns a ticket into small spec stories, runs each one through durable developer, tester, and PR-creator agents, and builds every agent's prompt from a shared knowledge base.</p>
+<p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
+
+<h2>Problem and constraints</h2>
+<p>Engineers on a network-security product wanted coding agents to carry routine stories from ticket to pull request without someone watching each one. A single autonomous story takes 20 to 60 minutes of agent work. In-harness subagents expire and have no retry, so a long run could fail silently partway through.</p>
+<ul>
+<li>Many stories had to run in parallel, and one failure couldn't take down the rest.</li>
+<li>Agents needed the team's real build, test, and review knowledge, not generic advice.</li>
+<li>Every engineer had to run the same version of that knowledge, updated with one command.</li>
+<li>Credentials for background workers couldn't leak into interactive sessions.</li>
+</ul>
+
+<h2>Architecture</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  T[Ticket] --> B[Spec breakdown skill]
+  B --> S1[Story 1]
+  B --> S2[Story 2]
+  B --> S3[Story N]
+  S1 & S2 & S3 --> Q[Durable workflow queue]
+  Q --> W[Story workflow]
+  W --> D[Developer agent]
+  D --> Te[Tester agent]
+  Te --> P[PR-creator agent]
+  P --> PR[Pull request on a product repo]
+  KB[(Shared knowledge base)] --> X[Extract step]
+  X --> R[Roles]
+  X --> F[Workflows]
+  X --> K[Facts]
+  R & F & K --> W
+</pre></div>
+<p>The devkit is a plugin for a coding-agent harness. A breakdown skill splits a ticket into spec stories. A batch skill fetches all of them in one query and starts one durable workflow per story on a local Temporal server, then returns at once. A background worker picks the workflows up. Inside each one, three agents run in order: developer, then tester, then PR creator. Each step waits for the one before it.</p>
+<p>The same stories can instead be sent to a shared, centrally run agent platform, one pipeline run per story. Engineers pick local or shared execution per batch.</p>
+
+<h2>Data flow: how an agent's prompt is built</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  A[Personal dev notes] --> E[Extract and classify]
+  B[(Shared knowledge base)] --> E
+  E --> R[Role]
+  E --> F[Workflow]
+  E --> K[Knowledge]
+  R & F & K --> SP[Agent system prompt]
+  G[Glossary + cited summaries] --> SP
+</pre></div>
+<p>The extract step sorts knowledge into three domains. <b>Role</b> lines are imperatives such as "always" and "never". <b>Workflow</b> lines are numbered steps and "when X" procedures. <b>Knowledge</b> lines are facts: file paths, commands, ports, conventions. Each agent's system prompt is role plus the selected workflow plus the relevant facts, then an optional glossary and cited summaries.</p>
+<p>I kept role and workflow apart on purpose. A developer and a tester can both have a "handle a bug" workflow but look at it through different lenses. Merging them would blur identity and procedure, and the prompt composer couldn't mix them freely.</p>
+<p>The knowledge base has a strict boundary. Engineers capture a decision locally, a conflict check runs against the shared base, and the entry goes in through a pull request that a knowledge-base owner reviews. After merge, the devkit's update command pulls it down and reseeds every project. The devkit only reads the shared base. One separate plugin owns every write. The <a href="/kit-architecture.html">kit overview</a> has the sync diagram.</p>
+
+<h2>Control and logic flow</h2>
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant E as Engineer
+  participant B as Batch skill
+  participant Q as Workflow server
+  participant C as Classifier (small model)
+  participant A as Agents (main model)
+  E->>B: run batch for stories
+  B->>Q: start one workflow per story
+  B-->>E: returns immediately
+  Q->>C: ticket type, summary, description
+  C-->>Q: new-requirement / bug / test-failure / pr-review
+  Q->>A: developer (role + workflow + facts)
+  A-->>Q: change ready
+  Q->>A: tester
+  A-->>Q: pass
+  Q->>A: PR creator
+  A-->>Q: PR opened
+</pre></div>
+<p>Before the agents run, a small, fast model picks the workflow scenario from the ticket's type, summary, and the start of its description, at temperature 0 with a one-word answer. That is a routing decision, so it doesn't need the large model. I rejected keyword matching because it fails quietly: "address the erratic behavior in the auth module" is a bug with no trigger words, and "test the new login requirement" contains "test" but isn't a test failure. If the classifier call fails, the workflow falls back to new-requirement and keeps going.</p>
+
+<h2>Failure modes and guardrails</h2>
+<div class="tw"><table>
+<tr><th>Failure</th><th>Guardrail</th></tr>
+<tr><td>Agent activity crashes or the API is briefly unavailable</td><td>Each activity retries twice with a 30-second backoff. Workflow history survives machine restarts.</td></tr>
+<tr><td>One story fails</td><td>Each story is its own workflow, so the rest keep running.</td></tr>
+<tr><td>Tester never passes</td><td>The PR creator waits for a tester pass, so failing work never becomes a PR.</td></tr>
+<tr><td>Classifier is down</td><td>Defaults to new-requirement instead of blocking.</td></tr>
+<tr><td>Worker token leaks into interactive sessions</td><td>The worker's token lives in its own env file that only the worker loads, never in the harness's shared settings.</td></tr>
+<tr><td>Ticket fetches flood the context window</td><td>A script returns compact, field-filtered JSON instead of large tool responses.</td></tr>
+<tr><td>Engineers drift onto old knowledge</td><td>One update command pulls the newest plugin and knowledge base and reseeds each project. A session-start hook checks freshness and suggests the command to run, but never changes files on its own.</td></tr>
+</table></div>
+
+<h2>Tradeoffs and alternatives I rejected</h2>
+<ul>
+<li><b>Background subagents instead of a workflow engine.</b> Simpler, but they expire, have no retry, and can't run many hour-long stories in parallel. Temporal adds a daemon to install, and in exchange I get durable execution, parallel child workflows, and a UI for watching runs.</li>
+<li><b>Two knowledge domains instead of three.</b> Fewer files, but role and procedure get tangled.</li>
+<li><b>One large model for everything.</b> Classification on the big model costs more and is slower, with no accuracy gain on a single-token answer.</li>
+<li><b>Local-only execution.</b> Keeping a shared-platform path lets teams move work off laptops without rewriting stories.</li>
+</ul>
+
+<h2>What I'd do next</h2>
+<ul>
+<li>Add an evaluation set of past stories so changes to prompts and knowledge can be scored before rollout.</li>
+<li>Record classifier decisions next to outcomes, to see which scenarios get misrouted.</li>
+<li>Track per-story cost and time so we can decide which stories should go local and which should go to the shared platform.</li>
+</ul>
+
+<footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:false,theme:"neutral",fontFamily:"-apple-system,Segoe UI,Arial,sans-serif",flowchart:{useMaxWidth:true},sequence:{useMaxWidth:true}});
+let i=0;
+for (const el of document.querySelectorAll("pre.mermaid")) { const {svg}=await mermaid.render("d"+(i++), el.textContent); const div=document.createElement("div"); div.innerHTML=svg; el.replaceWith(div); }
+document.body.dataset.ready="1";
+</script>
+</body></html>

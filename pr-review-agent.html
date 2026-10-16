@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>An AI pull-request reviewer that blocks on what matters · Benny Fu</title>
+<style>
+:root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
+*{box-sizing:border-box}
+body{margin:0;font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--fg);background:#fff}
+main{max-width:720px;margin:0 auto;padding:56px 24px 48px}
+.back{font-size:.9rem}
+h1{font-size:1.9rem;line-height:1.25;margin:16px 0 8px}
+.lede{color:var(--muted);margin:0 0 8px}
+h2{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:44px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:20px}li{margin:0 0 6px}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.diagram{border:1px solid var(--line);border-radius:8px;padding:16px;margin:0 0 16px;overflow-x:auto;background:#f6f8fa}
+.diagram svg[aria-roledescription="sequence"]{min-width:560px}
+.diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+code{font-size:.9em;background:#f6f8fa;padding:1px 4px;border-radius:4px}
+.meta{color:var(--muted);font-size:.9rem;margin:0 0 4px}
+table{border-collapse:collapse;width:100%;margin:0 0 16px;font-size:.92rem}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:#f6f8fa}
+.tw{overflow-x:auto}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+@media (max-width:480px){main{padding:36px 18px 32px}h1{font-size:1.55rem}.diagram{padding:10px}}
+</style></head>
+<body><main>
+<a class="back" href="/">← Benny Fu</a>
+<h1>An AI pull-request reviewer that blocks on what matters</h1>
+<p class="lede">A reusable CI pipeline that reviews every pull request in focused passes (security, reliability, compatibility, compliance), remembers what it already said, and blocks merges only on high and critical findings.</p>
+<p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
+
+<h2>Problem and constraints</h2>
+<p>A network-security product has to meet compliance programs such as FedRAMP, ISMAP, and PCI DSS. Human reviewers couldn't check every pull request against all of that, and generic AI review bots produce noise. Noise matters: if a bot repeats the same finding on every push, developers stop reading it.</p>
+<ul>
+<li>Review had to run on every pull request, in many repos, with almost no setup per repo.</li>
+<li>It had to call a corporate LLM endpoint, with keys held as CI secrets.</li>
+<li>Teams needed to try it in advisory mode first and switch to blocking later.</li>
+<li>Findings must never apply to code that has already moved on, for example after a force push.</li>
+</ul>
+
+<h2>Architecture</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart LR
+  C[Product repo: contract + thin workflow] --> U7[Orchestrator]
+  U7 --> U2[Risk classifier]
+  U7 --> U3[Freshness check]
+  U7 --> U4[AI review engine]
+  U7 --> U5[Comment writer + memory]
+  U7 --> U6[Check run]
+</pre></div>
+<p>I split the reviewer into small units with clear boundaries. Each one has a single job and its own tests. A product repo adopts it with two files: a contract that names its risky paths, languages, and mode, and a short workflow that calls the shared reusable workflow. A later unit runs the same engine as a GitHub App on webhooks, for orgs where reusable workflows don't fit. Two more units sit beside the pipeline: an on-demand full-repo compliance scan that reuses the review prompts, and a fix-PR creator that needs human approval.</p>
+
+<h2>Control and logic flow</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  A([PR opened or updated]) --> B[Load contract]
+  B --> C{Kill switch?}
+  C -->|disabled| Z1([Exit])
+  C -->|advisory or blocking| D[Classify changed files]
+  D --> E{All low risk?}
+  E -->|yes| Z2([Exit: nothing to review])
+  E -->|no| F{Head SHA still current?}
+  F -->|no, force push| Z3([Abort stale review])
+  F -->|yes| G[Start check run]
+  G --> H[Pass 1: security]
+  H --> I[Pass 2: reliability]
+  I --> J[Pass 3: compatibility]
+  J --> K[Compliance pass]
+  K --> L{Findings?}
+  L -->|no| M([Check passes])
+  L -->|yes| N[Drop repeats, post summary and findings]
+  N --> O{Blocking mode and any high or critical?}
+  O -->|yes| P([Check fails: merge blocked])
+  O -->|no| Q([Check passes: advisory])
+</pre></div>
+<p>Each pass has its own prompt and looks at one concern. One prompt that covers everything mixes the domains: security notes leak into style comments, and the model spreads its attention thin. Separate passes cost more calls, but each finding is sharper and easier to trust.</p>
+<p>Three early exits keep cost and noise down. The kill switch turns the agent off per repo without a code change. The risk classifier skips pull requests that touch only low-risk paths. The freshness check aborts if the head commit moved during the run, so a review never lands on code it didn't read.</p>
+
+<h2>Data flow: review memory</h2>
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant O as Orchestrator
+  participant G as PR comments
+  participant H as Compare API
+  participant W as Comment writer
+  O->>G: read earlier agent comments
+  G-->>O: reviewed SHA + finding fingerprints
+  O->>H: files changed since that SHA
+  H-->>O: changed-file set
+  O->>W: new findings
+  W->>W: same fingerprint + file unchanged = collapse as repeat
+  W->>W: fingerprint dismissed by developer = suppress
+  W->>G: replace old agent comment with one fresh summary
+</pre></div>
+<p>The reviewer keeps no database. Its memory lives in the pull request itself. Every agent comment carries hidden markers with the reviewed commit and a fingerprint for each finding. On the next run, the writer reads them back and asks the compare API which files changed since then. A finding with the same fingerprint in an unchanged file is a repeat, so it gets collapsed rather than posted again. A developer can dismiss a fingerprint with a marker in a comment, and that suppression sticks. Old agent comments are deleted and replaced, so the thread always shows one current summary.</p>
+
+<h2>Failure modes and guardrails</h2>
+<ul>
+<li><b>Bad or noisy rollout:</b> advisory mode first. The kill switch is in the contract.</li>
+<li><b>Stale review after a force push:</b> the SHA check aborts the run.</li>
+<li><b>Repeated findings:</b> fingerprints, the changed-since check, and developer dismissals.</li>
+<li><b>Over-blocking:</b> only high and critical findings fail the check, and only in blocking mode.</li>
+<li><b>Large repos for compliance scans:</b> the on-demand full-repo scan filters by language and skip paths, splits files into LLM-sized batches, removes duplicate findings, and files one issue as the result.</li>
+<li><b>Automated fixes:</b> a separate unit can open a fix PR against the feature branch, but a human must approve it. It never pushes to the author's branch.</li>
+<li><b>Secrets:</b> the endpoint, key, and checkout token are CI secrets, referenced by name only.</li>
+</ul>
+
+<h2>Tradeoffs and alternatives I rejected</h2>
+<ul>
+<li><b>A database for review history.</b> More flexible, but it's one more service to run and secure. PR comments are already scoped, audited, and visible to the developer.</li>
+<li><b>One combined review prompt.</b> Cheaper, but noisier and harder to tune.</li>
+<li><b>Blocking from day one.</b> Fastest path to enforcement, but also the fastest way to lose developer trust.</li>
+<li><b>Auto-pushing fixes.</b> Rejected. Fix PRs are separate and need human approval.</li>
+</ul>
+
+<h2>What I'd do next</h2>
+<ul>
+<li>Label a sample of findings as true or false positives, so each pass's precision can be tracked over time.</li>
+<li>Feed developer dismissals back as prompt examples for each repo.</li>
+<li>Link findings to compliance control IDs so audit evidence comes out of normal review.</li>
+</ul>
+
+<footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:false,theme:"neutral",fontFamily:"-apple-system,Segoe UI,Arial,sans-serif",flowchart:{useMaxWidth:true},sequence:{useMaxWidth:true}});
+let i=0;
+for (const el of document.querySelectorAll("pre.mermaid")) { const {svg}=await mermaid.render("d"+(i++), el.textContent); const div=document.createElement("div"); div.innerHTML=svg; el.replaceWith(div); }
+document.body.dataset.ready="1";
+</script>
+</body></html>
