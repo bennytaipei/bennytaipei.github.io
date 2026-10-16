@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Harness-agnostic agent tools and the human handoff · Benny Fu</title>
+<style>
+:root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
+*{box-sizing:border-box}
+body{margin:0;font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--fg);background:#fff}
+main{max-width:720px;margin:0 auto;padding:56px 24px 48px}
+.back{font-size:.9rem}
+h1{font-size:1.9rem;line-height:1.25;margin:16px 0 8px}
+.lede{color:var(--muted);margin:0 0 8px}
+h2{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:44px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:20px}li{margin:0 0 6px}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.diagram{border:1px solid var(--line);border-radius:8px;padding:16px;margin:0 0 16px;overflow-x:auto;background:#f6f8fa}
+.diagram svg[aria-roledescription="sequence"]{min-width:560px}
+.diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+code{font-size:.9em;background:#f6f8fa;padding:1px 4px;border-radius:4px}
+.meta{color:var(--muted);font-size:.9rem;margin:0 0 4px}
+table{border-collapse:collapse;width:100%;margin:0 0 16px;font-size:.92rem}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:#f6f8fa}
+.tw{overflow-x:auto}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+@media (max-width:480px){main{padding:36px 18px 32px}h1{font-size:1.55rem}.diagram{padding:10px}}
+</style></head>
+<body><main>
+<a class="back" href="/">← Benny Fu</a>
+<h1>Harness-agnostic agent tools and the human handoff</h1>
+<p class="lede">A manifest-first tool catalog, plus a containerized browser runtime whose handoff call puts a person in the loop through noVNC whenever an agent hits a login wall.</p>
+<p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
+
+<h2>Problem and constraints</h2>
+<p>I run several agent harnesses, local and in the cloud. Each has its own way to declare tools, and every one eventually reaches a single sign-on page it can't get past. I wanted one tool definition that every harness could use, and a safe way for a person to step in.</p>
+<ul>
+<li>Tools must be described once and work in any harness.</li>
+<li>Agents shouldn't load every tool schema up front, because it wastes context.</li>
+<li>Credentials are never stored in the repo, and manifests name them without holding values.</li>
+<li>A human handoff must always clean up after itself, even on a timeout.</li>
+</ul>
+
+<h2>Architecture</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  IDX[Catalog index] --> MF[Browser tool manifests]
+  SCH[Schema contract] -.validates.-> MF
+  MF -->|loaded at startup| RT[Browser runtime: MCP]
+  H[Local and cloud harnesses] --> RT
+  RT --> CT[Container: display + Chromium]
+</pre></div>
+<p>The repo holds manifests, not implementations. Level one is an index of namespaces, each with one line of description. Level two is one manifest per tool. An agent reads the index first and loads a namespace's schemas only when it needs them.</p>
+<p>Every manifest follows one schema with no extra fields allowed. It requires a qualified name, a semver version, when to use the tool, typed inputs and outputs, a non-empty side-effect statement ("None." for read-only tools), named error codes, and the names of the credentials it needs. A checker validates every manifest against the schema. Policy and judgment stay in skills, not in tools.</p>
+<p>The browser runtime reads its tool names, descriptions, and schemas from those manifests when it starts, so the contract and the server can't drift apart. Each harness starts the runtime in a Podman container with a virtual display and a persistent browser profile.</p>
+
+<h2>Control flow: one blocking handoff call</h2>
+<div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant A as Agent
+  participant R as Browser runtime
+  participant N as Notifier
+  participant P as Person
+  A->>R: navigate, read
+  R-->>A: login wall
+  A->>R: handoff(reason, timeout)
+  R->>R: start VNC + noVNC on free ports
+  R->>N: POST reason, url, expires_at
+  N->>P: notification with link
+  P->>R: signs in on the same live browser
+  P->>R: presses Done
+  R->>R: stop VNC + noVNC
+  R-->>A: done / timeout / cancelled
+  A->>R: read (now signed in)
+</pre></div>
+<p>Handoff is one blocking call, not a start and stop pair. The runtime starts the screen share only for the length of the call, notifies me through a webhook, waits for Done, Cancel, or the timeout, and always tears the share down before it returns. The agent can't forget to stop sharing, because it never started sharing itself.</p>
+
+<h2>Data flow</h2>
+<ul>
+<li><b>In:</b> tool calls from the harness over stdio. The settings are environment variables: profile directory, notify webhook, ports, and bind address.</li>
+<li><b>Out to a person:</b> one JSON message with the reason, a link, and an expiry. The link opens noVNC on the same live browser the agent was using.</li>
+<li><b>Kept:</b> only the browser profile, so a sign-in lasts across sessions. Handoff tokens and the X authority file sit in a runtime folder next to it.</li>
+</ul>
+
+<h2>Failure modes and guardrails</h2>
+<ul>
+<li><b>Notifier unreachable:</b> handoff returns <code>notify_failed</code> and tears down the share. It never leaves a live screen open with nobody told.</li>
+<li><b>Exposure:</b> by default listeners bind to localhost, and the VNC server itself stays on a private localhost port.</li>
+<li><b>Display collisions:</b> the runtime picks a free display and never attaches to one in use.</li>
+<li><b>Breaking changes:</b> semver rules define when a contract change needs a major version bump.</li>
+<li><b>Known gap:</b> some harness launchers pin fixed ports, so a second parallel session can fail its handshake while the first holds them. The fix is per-session free ports in the launcher, which the runtime already supports.</li>
+</ul>
+
+<h2>Tradeoffs and alternatives I rejected</h2>
+<ul>
+<li><b>Driving my desktop browser over its debug port.</b> It shares my real session, but a browser update or relaunch breaks it, and the agent gets my whole profile. The container keeps a separate profile and comes back on its own.</li>
+<li><b>Separate start and stop handoff tools.</b> A missed stop leaves a screen share open.</li>
+<li><b>Tools defined per harness.</b> Quicker the first time, but every harness then needs its own copy and they drift.</li>
+</ul>
+
+<h2>What I'd do next</h2>
+<ul>
+<li>Pick ports per session in every launcher, and add a health check before the first tool call.</li>
+<li>Add more namespaces, such as chat, behind the same contract.</li>
+</ul>
+
+<footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:false,theme:"neutral",fontFamily:"-apple-system,Segoe UI,Arial,sans-serif",flowchart:{useMaxWidth:true},sequence:{useMaxWidth:true}});
+let i=0;
+for (const el of document.querySelectorAll("pre.mermaid")) { const {svg}=await mermaid.render("d"+(i++), el.textContent); const div=document.createElement("div"); div.innerHTML=svg; el.replaceWith(div); }
+document.body.dataset.ready="1";
+</script>
+</body></html>

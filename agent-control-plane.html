@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Running many coding agents at once: a lightweight control plane · Benny Fu</title>
+<style>
+:root{--fg:#1f2328;--muted:#59636e;--line:#d1d9e0;--link:#0969da}
+*{box-sizing:border-box}
+body{margin:0;font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--fg);background:#fff}
+main{max-width:720px;margin:0 auto;padding:56px 24px 48px}
+.back{font-size:.9rem}
+h1{font-size:1.9rem;line-height:1.25;margin:16px 0 8px}
+.lede{color:var(--muted);margin:0 0 8px}
+h2{font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:44px 0 14px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+p{margin:0 0 12px}ul{margin:0 0 12px;padding-left:20px}li{margin:0 0 6px}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.diagram{border:1px solid var(--line);border-radius:8px;padding:16px;margin:0 0 16px;overflow-x:auto;background:#f6f8fa}
+.diagram svg[aria-roledescription="sequence"]{min-width:560px}
+.diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+code{font-size:.9em;background:#f6f8fa;padding:1px 4px;border-radius:4px}
+.meta{color:var(--muted);font-size:.9rem;margin:0 0 4px}
+table{border-collapse:collapse;width:100%;margin:0 0 16px;font-size:.92rem}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:#f6f8fa}
+.tw{overflow-x:auto}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+@media (max-width:480px){main{padding:36px 18px 32px}h1{font-size:1.55rem}.diagram{padding:10px}}
+</style></head>
+<body><main>
+<a class="back" href="/">← Benny Fu</a>
+<h1>Running many coding agents at once: a lightweight control plane</h1>
+<p class="lede">How I keep track of parallel coding-agent sessions across harnesses with per-agent status files, a census, and clean handoff rules, without a central server.</p>
+<p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
+
+<h2>Problem and constraints</h2>
+<p>On a busy day I have several coding agents running in parallel, in different harnesses, repos, and worktrees. Questions kept coming up: which session owns which task, which one is blocked on me, and where a new session should pick up when an old one runs out of context. Asking each session took time and cut into its work.</p>
+<ul>
+<li>It had to work the same way in every harness.</li>
+<li>There could be no shared file that two agents write at once.</li>
+<li>A successor session had to be able to resume from what's on disk alone.</li>
+<li>It could add almost no load to me.</li>
+</ul>
+
+<h2>Architecture</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart LR
+  A1[Agent, harness 1] -->|atomic write| S1[agent-A.json]
+  A2[Agent, harness 2] -->|atomic write| S2[agent-B.json]
+  A3[Agent, harness 3] -->|atomic write| S3[agent-C.json]
+  S1 & S2 & S3 -->|read only| C[Census]
+  L[Session control server] --> C
+  C --> V[One view: task, state, blocked, needs me]
+</pre></div>
+<p>Every harness gets the same rule text, kept in one canonical file. Each agent writes only its own status file, named by harness and session id, in an ignored folder at the project root. The census reads those files to show one view of what's running. Session listing and steering go through <a href="https://bennytaipei.github.io/local-agent-mcp/">local-agent-mcp</a>.</p>
+
+<h2>Data flow: the status record</h2>
+<div class="tw"><table>
+<tr><th>Group</th><th>Fields</th></tr>
+<tr><td>Identity</td><td>harness, session id, pid, census slot</td></tr>
+<tr><td>Task tree</td><td>task key, parent, children, replaces</td></tr>
+<tr><td>Location</td><td>branch, worktree, PR links</td></tr>
+<tr><td>State</td><td>active, blocked, parked, done, exited, plus replaced and split for handoffs</td></tr>
+<tr><td>Progress</td><td>doing, next, checkpoint (what's done, where, and the exact next step)</td></tr>
+<tr><td>Attention</td><td>blocked, needs_human, health, context_near_limit, updated_at</td></tr>
+</table></div>
+<p>Each agent writes atomically: it writes to a temp file in the same folder, then renames it onto its own file. Readers never see half a record.</p>
+
+<h2>Control and logic flow</h2>
+<div class="diagram"><pre class="mermaid">
+flowchart TD
+  S([Session starts]) --> L[List status files]
+  L --> N{Task named by me?}
+  N -->|yes| R[Read newest file for that task, resume from checkpoint]
+  N -->|no| O{Open files exist?}
+  O -->|yes| Q[Ask once which one to continue]
+  O -->|no| NEW[Start a new file]
+  R --> M[Mark old file replaced]
+  Q --> M
+  M --> W[Work and write at milestones]
+  NEW --> W
+  W --> SP{Split?}
+  SP -->|yes| CH[Children A-1, A-2, each with its own worktree. Parent marked split]
+  SP -->|no| E([Exit: done, parked, or exited, with a checkpoint])
+</pre></div>
+<p>Agents write at startup, at milestones (plan set, blocked, PR opened, handoff), whenever state or needs_human changes, and on exit. The startup question is the only interruption allowed under my <a href="https://bennytaipei.github.io/local-agent-mcp/keep-going/">Keep-Going</a> anti-stall rules, and the agent asks it only when the choice is truly ambiguous.</p>
+
+<h2>Failure modes and guardrails</h2>
+<ul>
+<li><b>Write collisions:</b> one file per agent, written atomically. Agents never edit each other's files, except to mark a file whose process is gone or when I ask.</li>
+<li><b>Lost context:</b> the checkpoint field is written for a stranger to resume from.</li>
+<li><b>Parallel edits to the same files:</b> each split child gets its own worktree and branch. The default is one seat per initiative.</li>
+<li><b>Leaking into the repo:</b> the folder is added to git's local exclude list and never committed.</li>
+<li><b>Stale census:</b> the census marks sessions with no live process as not live instead of trusting their last report.</li>
+</ul>
+
+<h2>Tradeoffs and alternatives I rejected</h2>
+<ul>
+<li><b>A single shared status file.</b> I started with one. I moved to per-agent files so concurrent writers can never overwrite each other.</li>
+<li><b>A central server or database.</b> More features, but one more thing to keep alive, and every harness would need a client. Plain files work everywhere.</li>
+<li><b>Asking each session for status.</b> Costs every session context and attention. Reading a file costs it nothing.</li>
+</ul>
+
+<h2>What I'd do next</h2>
+<ul>
+<li>Publish the status schema as a JSON Schema and validate files on write.</li>
+<li>Add a small dashboard on top of the census for blocked and needs-human items.</li>
+</ul>
+
+<footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:false,theme:"neutral",fontFamily:"-apple-system,Segoe UI,Arial,sans-serif",flowchart:{useMaxWidth:true},sequence:{useMaxWidth:true}});
+let i=0;
+for (const el of document.querySelectorAll("pre.mermaid")) { const {svg}=await mermaid.render("d"+(i++), el.textContent); const div=document.createElement("div"); div.innerHTML=svg; el.replaceWith(div); }
+document.body.dataset.ready="1";
+</script>
+</body></html>
