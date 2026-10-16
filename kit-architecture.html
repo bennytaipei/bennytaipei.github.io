@@ -78,7 +78,6 @@ sequenceDiagram
 </pre></div>
 <p>Each tool is described in a manifest that any harness can load. A manifest lists typed inputs and outputs, the side effect, named error codes, and the names of the credentials the tool needs, never their values. A checker validates every manifest against one schema, and versions follow semver.</p>
 <p>The browser namespace has four tools: navigate, read, screenshot, and handoff. Handoff is a single blocking call. It shares the live browser, notifies me, waits until I finish or the timeout passes, and ends the share itself. The agent gets back <code>done</code>, <code>timeout</code>, or <code>cancelled</code>. There is no separate start or stop step.</p>
-<p>Session control for local agents is covered in <a href="https://bennytaipei.github.io/local-agent-mcp/">local-agent-mcp</a>.</p>
 
 <footer><a href="mailto:sendtobenny@icloud.com">sendtobenny@icloud.com</a> · <a href="https://github.com/bennytaipei">GitHub</a></footer>
 </main>

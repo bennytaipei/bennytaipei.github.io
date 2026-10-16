@@ -48,7 +48,7 @@ flowchart LR
   L[Session control server] --> C
   C --> V[One view: task, state, blocked, needs me]
 </pre></div>
-<p>Every harness gets the same rule text from one canonical file. Each agent writes only its own status file, named by harness and session id, in an ignored folder at the project root. The census reads those files and shows what's running. Session listing and steering go through <a href="https://bennytaipei.github.io/local-agent-mcp/">local-agent-mcp</a>.</p>
+<p>Every harness gets the same rule text from one canonical file. Each agent writes only its own status file, named by harness and session id, in an ignored folder at the project root. The census reads those files and shows what's running.</p>
 
 <h2>The status record</h2>
 <div class="tw"><table>
