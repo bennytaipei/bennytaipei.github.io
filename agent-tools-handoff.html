@@ -28,6 +28,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.9rem}
 <h1>Agent tool manifests and the browser handoff</h1>
 <p class="lede">I built a tool catalog where each tool is a manifest that any agent harness can load, and a containerized browser runtime with a handoff call that lets me sign in over noVNC when an agent hits a login page.</p>
 <p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
+<p class="meta">Code: <a href="https://github.com/bennytaipei/agent-tools">agent-tools</a> on GitHub, the tool-manifest catalog and containerized browser runtime this page describes.</p>
 
 <h2>Problem and constraints</h2>
 <p>I use several agent harnesses, local and in the cloud. Each declares tools differently, and each one eventually hits a single sign-on page it can't get past. I wanted one tool definition that works in every harness, and a way for me to sign in for the agent.</p>

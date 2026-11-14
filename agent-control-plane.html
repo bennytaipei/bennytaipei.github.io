@@ -28,6 +28,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.9rem}
 <h1>Tracking parallel coding-agent sessions</h1>
 <p class="lede">I designed and built the status rules I use to track parallel coding-agent sessions across harnesses. Each agent writes its own status file, a census reads them, and handoff rules let a new session resume from disk. There is no central server.</p>
 <p class="meta">Built in 2026 · Part of my AI developer tooling work</p>
+<p class="meta">Code: <a href="https://github.com/bennytaipei/local-agent-mcp">local-agent-mcp</a> on GitHub, an MCP server that lists, launches, steers, and reads local coding-agent sessions.</p>
 
 <h2>Problem and constraints</h2>
 <p>I often run several coding agents at once, in different harnesses, repos, and worktrees. I needed to know which session owns which task, which one is waiting on me, and where a new session should resume when an old one runs out of context. Asking each session took time and interrupted its work.</p>
